@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -15,6 +16,11 @@ const WEBHOOK = process.env.DISCORD_WEBHOOK_URL || '';
 // directly in site.html for anyone to view-source and copy.
 const LOG_WEBHOOK = process.env.DISCORD_LOG_WEBHOOK_URL || '';
 const STATUS_INTERVAL_MS = Math.max(60000, Number(process.env.STATUS_INTERVAL_MS || 300000));
+const AUTH_JWT_SECRET = String(process.env.AUTH_JWT_SECRET || '').trim();
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/$/,'');
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const AUTH_COOKIE = 'conefix_auth';
+const AUTH_TTL_SECONDS = 60 * 60 * 24 * 7;
 let statusMessageId = process.env.DISCORD_STATUS_MESSAGE_ID || '';
 let startedAt = Date.now();
 let lastStatus = null;
@@ -22,15 +28,23 @@ let lastStatus = null;
 app.use(express.json());
 // Allow the Site tab to live on Netlify or be opened locally while the creator API runs here.
 app.use((req,res,next)=>{
-  res.setHeader('Access-Control-Allow-Origin','*');
+  const origin = String(req.headers.origin || '');
+  // Credentialed browser requests cannot use Access-Control-Allow-Origin: *.
+  // Echo the requesting origin when present and explicitly allow cookies.
+  if(origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
   res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers','Content-Type');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type, Accept');
   if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
 });
 const DATA_DIR = path.join(__dirname, 'data');
 const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
 const RUNTIME_DATA_DIR = IS_VERCEL ? '/tmp/conefix-data' : DATA_DIR;
+const AUTH_DB = path.join(RUNTIME_DATA_DIR, 'auth-users.json');
 const RUNTIME_UPLOAD_DIR = IS_VERCEL ? '/tmp/conefix-uploads' : UPLOAD_DIR;
 const STATS_DB = path.join(RUNTIME_DATA_DIR, 'website-stats.json');
 const CREATOR_DB = path.join(RUNTIME_DATA_DIR, 'creator-projects.json');
@@ -74,6 +88,176 @@ function getStats(db=readStats()){
 }
 if(!IS_VERCEL && !fs.existsSync(STATS_DB)) writeStats(defaultStats());
 
+
+/* -------------------- CONEFIX AUTH --------------------
+   Passwords are hashed with Node's built-in scrypt. On Vercel, persistent users
+   are stored in Supabase via the service-role API; locally a JSON file is used.
+   The service-role key never reaches the browser.
+-------------------------------------------------------- */
+function authConfigured() {
+  return Boolean(AUTH_JWT_SECRET) && (Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) || !IS_VERCEL);
+}
+function authSetupError() {
+  return 'Authentication is not configured. Add AUTH_JWT_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables.';
+}
+if (!IS_VERCEL && !fs.existsSync(AUTH_DB)) {
+  try { fs.writeFileSync(AUTH_DB, JSON.stringify({ users: [] }, null, 2)); } catch {}
+}
+let memoryAuthDB = { users: [] };
+function readAuthDB() {
+  if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) return null;
+  if (IS_VERCEL) return memoryAuthDB;
+  try { return JSON.parse(fs.readFileSync(AUTH_DB, 'utf8')); } catch { return { users: [] }; }
+}
+function writeAuthDB(db) {
+  memoryAuthDB = db;
+  if (IS_VERCEL || !db) return;
+  try { fs.writeFileSync(AUTH_DB, JSON.stringify(db, null, 2)); } catch {}
+}
+function cleanUsername(v) { return String(v || '').trim().replace(/\s+/g,' ').slice(0,32); }
+function cleanEmail(v) { return String(v || '').trim().toLowerCase().slice(0,254); }
+function validEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+function validUsername(v) { return /^[a-zA-Z0-9_.-]{3,32}$/.test(v); }
+function hashPassword(password) {
+  return new Promise((resolve,reject) => {
+    const salt = crypto.randomBytes(16).toString('hex');
+    crypto.scrypt(password, salt, 64, { N: 16384, r: 8, p: 1 }, (err,key) => {
+      if (err) return reject(err);
+      resolve(`scrypt$16384$8$1$${salt}$${key.toString('hex')}`);
+    });
+  });
+}
+function verifyPassword(password, stored) {
+  return new Promise(resolve => {
+    const parts=String(stored||'').split('$');
+    if(parts.length!==7 || parts[0]!=='scrypt') return resolve(false);
+    const N=Number(parts[1]), r=Number(parts[2]), p=Number(parts[3]), salt=parts[4], expected=Buffer.from(parts[5]||'', 'hex');
+    if(!N || !r || !p || !salt || expected.length!==64) return resolve(false);
+    crypto.scrypt(password, salt, 64, {N,r,p}, (err,key) => {
+      if(err || key.length!==expected.length) return resolve(false);
+      resolve(crypto.timingSafeEqual(key, expected));
+    });
+  });
+}
+function base64url(input){ return Buffer.from(input).toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_'); }
+function signToken(payload) {
+  const header=base64url(JSON.stringify({alg:'HS256',typ:'JWT'}));
+  const body=base64url(JSON.stringify(payload));
+  const sig=crypto.createHmac('sha256',AUTH_JWT_SECRET).update(`${header}.${body}`).digest('base64url');
+  return `${header}.${body}.${sig}`;
+}
+function verifyToken(token) {
+  try {
+    if(!AUTH_JWT_SECRET || !token) return null;
+    const [header,body,sig]=String(token).split('.');
+    if(!header||!body||!sig) return null;
+    const expected=crypto.createHmac('sha256',AUTH_JWT_SECRET).update(`${header}.${body}`).digest('base64url');
+    const a=Buffer.from(sig), b=Buffer.from(expected);
+    if(a.length!==b.length || !crypto.timingSafeEqual(a,b)) return null;
+    const p=JSON.parse(Buffer.from(body,'base64url').toString('utf8'));
+    if(!p.exp || p.exp < Math.floor(Date.now()/1000)) return null;
+    return p;
+  } catch { return null; }
+}
+function getCookie(req,name){
+  const raw=String(req.headers.cookie||'');
+  const item=raw.split(';').map(x=>x.trim()).find(x=>x.startsWith(name+'='));
+  return item ? decodeURIComponent(item.slice(name.length+1)) : '';
+}
+function currentUser(req){ return verifyToken(getCookie(req,AUTH_COOKIE)); }
+function requireAuth(req,res,next){
+  const user=currentUser(req);
+  if(!user) return res.status(401).json({error:'Please log in to continue.'});
+  req.user=user; next();
+}
+function authUserView(u){ return u ? {id:u.id,username:u.username,email:u.email,createdAt:u.created_at||u.createdAt} : null; }
+async function supabaseRequest(endpoint, options={}) {
+  if(!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error(authSetupError());
+  const res=await fetch(`${SUPABASE_URL}/rest/v1/${endpoint}`,{
+    ...options,
+    headers:{
+      apikey:SUPABASE_SERVICE_ROLE_KEY,
+      Authorization:`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type':'application/json',
+      ...(options.headers||{})
+    }
+  });
+  const text=await res.text();
+  let data=null; try{data=text?JSON.parse(text):null;}catch{}
+  if(!res.ok) throw new Error(data?.message || data?.hint || `Database HTTP ${res.status}`);
+  return data;
+}
+async function findUserByUsername(username){
+  if(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY){
+    const rows=await supabaseRequest(`conefix_users?select=id,username,email,password_hash,created_at&username=eq.${encodeURIComponent(username)}&limit=1`);
+    return rows?.[0]||null;
+  }
+  const db=readAuthDB(); return db.users.find(u=>u.username.toLowerCase()===username.toLowerCase())||null;
+}
+async function findUserByEmail(email){
+  if(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY){
+    const rows=await supabaseRequest(`conefix_users?select=id,username,email,password_hash,created_at&email=eq.${encodeURIComponent(email)}&limit=1`);
+    return rows?.[0]||null;
+  }
+  const db=readAuthDB(); return db.users.find(u=>u.email.toLowerCase()===email.toLowerCase())||null;
+}
+async function createUser(user){
+  if(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY){
+    const rows=await supabaseRequest('conefix_users?select=id,username,email,created_at',{
+      method:'POST', headers:{Prefer:'return=representation'}, body:JSON.stringify(user)
+    });
+    return rows?.[0]||null;
+  }
+  const db=readAuthDB();
+  const local={id:safeId(),...user,created_at:new Date().toISOString()};
+  db.users.push(local); writeAuthDB(db); return local;
+}
+function setAuthCookie(res,token){
+  const secure=IS_VERCEL ? '; Secure' : '';
+  res.setHeader('Set-Cookie',`${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; Max-Age=${AUTH_TTL_SECONDS}; HttpOnly; SameSite=Lax${secure}`);
+}
+function clearAuthCookie(res){
+  const secure=IS_VERCEL ? '; Secure' : '';
+  res.setHeader('Set-Cookie',`${AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${secure}`);
+}
+function authTokenFor(user){
+  const now=Math.floor(Date.now()/1000);
+  return signToken({sub:user.id,username:user.username,email:user.email,iat:now,exp:now+AUTH_TTL_SECONDS});
+}
+
+app.get('/api/auth/config', (_req,res)=>res.json({configured:authConfigured()}));
+app.get('/api/auth/me', (req,res)=>{
+  const user=currentUser(req);
+  res.json({authenticated:Boolean(user),user:authUserView(user)});
+});
+app.post('/api/auth/signup', async (req,res)=>{
+  try{
+    if(!authConfigured()) return res.status(503).json({error:authSetupError()});
+    const username=cleanUsername(req.body?.username), email=cleanEmail(req.body?.email), password=String(req.body?.password||'');
+    if(!validUsername(username)) return res.status(400).json({error:'Username must be 3–32 characters: letters, numbers, _, . or -.'});
+    if(!validEmail(email)) return res.status(400).json({error:'Enter a valid email address.'});
+    if(password.length<8 || password.length>128) return res.status(400).json({error:'Password must be 8–128 characters.'});
+    if(await findUserByUsername(username) || await findUserByEmail(email)) return res.status(409).json({error:'That username or email is already registered.'});
+    const password_hash=await hashPassword(password);
+    const user=await createUser({username,email,password_hash});
+    if(!user) throw new Error('Could not create account.');
+    setAuthCookie(res,authTokenFor(user));
+    res.status(201).json({ok:true,user:authUserView(user)});
+  }catch(e){res.status(500).json({error:e.message||'Could not create account.'});}
+});
+app.post('/api/auth/login', async (req,res)=>{
+  try{
+    if(!authConfigured()) return res.status(503).json({error:authSetupError()});
+    const identifier=String(req.body?.identifier||'').trim(), password=String(req.body?.password||'');
+    if(!identifier || !password) return res.status(400).json({error:'Enter your username/email and password.'});
+    const user=identifier.includes('@') ? await findUserByEmail(cleanEmail(identifier)) : await findUserByUsername(cleanUsername(identifier));
+    if(!user || !(await verifyPassword(password,user.password_hash))) return res.status(401).json({error:'Incorrect login details.'});
+    setAuthCookie(res,authTokenFor(user));
+    res.json({ok:true,user:authUserView(user)});
+  }catch(e){res.status(500).json({error:e.message||'Could not log in.'});}
+});
+app.post('/api/auth/logout', (req,res)=>{ clearAuthCookie(res); res.json({ok:true}); });
+
 if (!IS_VERCEL && !fs.existsSync(CREATOR_DB)) { try { fs.writeFileSync(CREATOR_DB, JSON.stringify({ projects: [] }, null, 2)); } catch {} }
 let memoryCreatorDB = { projects: [] };
 function readCreatorDB(){ if (IS_VERCEL) return memoryCreatorDB; try { return JSON.parse(fs.readFileSync(CREATOR_DB, 'utf8')); } catch { return { projects: [] }; } }
@@ -88,21 +272,25 @@ function safeId(){ return `${Date.now().toString(36)}-${Math.random().toString(3
 
 app.get('/api/creator/health', (_req,res)=>res.json({ok:true,service:'CONEFIX Creator API'}));
 app.get('/api/creator/projects', (_req, res) => res.json(readCreatorDB()));
-app.post('/api/creator/projects', upload.fields([{name:'icon',maxCount:1},{name:'screenshots',maxCount:8}]), (req,res)=>{
+app.get('/api/creator/my-projects', requireAuth, (req, res) => {
+  const db=readCreatorDB();
+  res.json({projects:db.projects.filter(p=>p.ownerId===req.user.sub)});
+});
+app.post('/api/creator/projects', requireAuth, upload.fields([{name:'icon',maxCount:1},{name:'screenshots',maxCount:8}]), (req,res)=>{
   try{
     const db=readCreatorDB();
     const id=safeId();
     const files=req.files||{};
     const icon=files.icon?.[0] ? `/uploads/${files.icon[0].filename}` : '';
     const screenshots=(files.screenshots||[]).map(f=>`/uploads/${f.filename}`);
-    const project={id,name:String(req.body.name||'').trim(),description:String(req.body.description||'').trim(),category:String(req.body.category||'').trim(),license:String(req.body.license||'').trim(),minecraft_versions:cleanList(req.body.minecraft_versions),loaders:cleanList(req.body.loaders),links:String(req.body.links||'').trim(),icon,screenshots,downloads:0,followers:0,createdAt:new Date().toISOString(),versions:[]};
+    const project={id,ownerId:req.user.sub,ownerUsername:req.user.username,name:String(req.body.name||'').trim(),description:String(req.body.description||'').trim(),category:String(req.body.category||'').trim(),license:String(req.body.license||'').trim(),minecraft_versions:cleanList(req.body.minecraft_versions),loaders:cleanList(req.body.loaders),links:String(req.body.links||'').trim(),icon,screenshots,downloads:0,followers:0,createdAt:new Date().toISOString(),versions:[]};
     if(!project.name||!project.description||!project.category) return res.status(400).json({error:'Project name, description and category are required.'});
     db.projects.push(project);writeCreatorDB(db);res.status(201).json(project);
   }catch(e){res.status(500).json({error:e.message});}
 });
-app.post('/api/creator/projects/:id/versions', upload.single('file'), (req,res)=>{
+app.post('/api/creator/projects/:id/versions', requireAuth, upload.single('file'), (req,res)=>{
   try{
-    const db=readCreatorDB();const p=db.projects.find(x=>x.id===req.params.id);if(!p)return res.status(404).json({error:'Project not found.'});
+    const db=readCreatorDB();const p=db.projects.find(x=>x.id===req.params.id && x.ownerId===req.user.sub);if(!p)return res.status(404).json({error:'Project not found.'});
     if(!req.file)return res.status(400).json({error:'Version file is required.'});
     const version={id:safeId(),version:String(req.body.version||'').trim(),minecraft_version:String(req.body.minecraft_version||'').trim(),loader:String(req.body.loader||'').trim(),filename:req.file.originalname,file:`/uploads/${req.file.filename}`,size:req.file.size,changelog:String(req.body.changelog||'').trim(),dependencies:String(req.body.dependencies||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),uploadedAt:new Date().toISOString(),downloads:0};
     if(!version.version||!version.minecraft_version)return res.status(400).json({error:'Version and Minecraft version are required.'});

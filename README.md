@@ -83,3 +83,23 @@ For local development, `.env.example` can be copied to `.env` and filled with yo
 - `server.js` — Express application and API
 - `data/website-stats.json` — local development statistics storage
 - `package.json` — Node/Express dependencies
+
+## CONEFIX Authentication
+
+The Creator Dashboard now includes Sign Up, Log In, Log Out, secure server-side password hashing, and protected creator actions.
+
+### Vercel setup (required for persistent accounts)
+
+1. Create a Supabase project.
+2. Open Supabase SQL Editor and run `supabase-auth.sql` from this project.
+3. In Vercel Project Settings → Environment Variables, add:
+   - `AUTH_JWT_SECRET` — a long random secret (32+ characters).
+   - `SUPABASE_URL` — your Supabase project URL.
+   - `SUPABASE_SERVICE_ROLE_KEY` — your Supabase service-role key. Keep this server-only and never put it in HTML.
+4. Redeploy the Vercel project.
+
+The browser only receives an HttpOnly session cookie. Passwords are hashed with Node's built-in `scrypt` and are never returned by the API.
+
+### Local development
+
+If `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are not set locally, the included backend stores local development accounts in `data/auth-users.json`. This is for local testing only; use Supabase for Vercel/production.
