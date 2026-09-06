@@ -584,9 +584,20 @@ hr{border:0!important;border-top:1px solid #242a31!important}
 @media(max-width:1150px){.search-wrap{order:4;flex-basis:100%;width:100%;margin:0}.search-wrap .search{width:100%}}
 @media(max-width:520px){.voice-search{display:grid!important}}
 </style>
+<style id="conefix-auth-css">
+.auth-actions{display:flex;align-items:center;gap:8px;margin-left:8px}.auth-user{font-size:12px;color:#d8c8e6;padding:9px 11px;border:1px solid #34243f;border-radius:9px;background:#111418}.auth-modal{position:fixed;inset:0;z-index:9999;display:none;place-items:center;padding:20px}.auth-modal.open{display:grid}.auth-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.72)}.auth-box{position:relative;width:min(420px,100%);background:#111418;border:1px solid #343941;border-radius:12px;padding:22px;box-shadow:0 25px 80px rgba(0,0,0,.45)}.auth-box h3{margin:0 0 6px;font-size:24px}.auth-box p{color:#9ca6ad;font-size:12px;line-height:1.5}.auth-close{position:absolute;right:12px;top:10px;border:0;background:transparent;color:#aaa;font-size:24px;cursor:pointer}.auth-tabs{display:flex;gap:6px;margin:16px 0}.auth-tab{flex:1;padding:10px;border:1px solid #30363d;background:#0d1013;color:#aaa;border-radius:8px;cursor:pointer}.auth-tab.active{background:#7815e1;border-color:#7815e1;color:#fff}.auth-form{display:grid;gap:10px}.auth-form label{display:grid;gap:5px;font-size:11px;color:#c9cfd4;font-weight:700}.auth-form input{box-sizing:border-box;width:100%;padding:11px;border:1px solid #30363d;background:#090b0d;color:#fff;border-radius:8px;outline:0}.auth-form input:focus{border-color:#9a45ff}.auth-status{min-height:18px;color:#c9b5da;font-size:12px}.auth-required{margin-top:10px;padding:10px;border:1px solid #30363d;border-radius:8px;background:#0d1013;color:#9ca6ad;font-size:11px}
+</style>
 </head>
 <body><div class="wrap">
-<nav><div class="logo"><img alt="Conefix" class="brand-logo" src="images/brand-logo.png"/></div><div class="conefix-main-tabs"><a href="index.html">Home</a><a class="active" href="site.html">Site</a><a href="#creators">Creators</a></div><div class="search-wrap"><input id="search" class="search" type="search" placeholder="Search packs, mods & categories..." autocomplete="off" aria-label="Search CONEFIX"><button id="voiceSearch" class="voice-search" type="button" aria-label="Voice search" title="Voice search">⌕</button></div><a class="discord" href="https://discord.gg/XBMsDVXC54" rel="noopener" target="_blank">◉ Join Discord</a></nav>
+<nav><div class="logo"><img alt="Conefix" class="brand-logo" src="images/brand-logo.png"/></div><div class="conefix-main-tabs"><a href="index.html">Home</a><a class="active" href="site.html">Site</a><a href="#creators">Creators</a></div><div class="search-wrap"><input id="search" class="search" type="search" placeholder="Search packs, mods & categories..." autocomplete="off" aria-label="Search CONEFIX"><button id="voiceSearch" class="voice-search" type="button" aria-label="Voice search" title="Voice search">⌕</button></div><a class="discord" href="https://discord.gg/XBMsDVXC54" rel="noopener" target="_blank">◉ Join Discord</a></nav><div class="auth-actions" id="authActions"><button class="btn dark" type="button" id="loginOpen">Log in</button><button class="btn green" type="button" id="signupOpen">Sign up</button></div>
+<div class="auth-modal" id="authModal" aria-hidden="true"><div class="auth-backdrop" id="authBackdrop"></div><div class="auth-box" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+<button class="auth-close" id="authClose" type="button" aria-label="Close">×</button><h3 id="authTitle">Log in to CONEFIX</h3><p id="authSubtitle">Use your account to access the Creator Dashboard.</p>
+<div class="auth-tabs"><button class="auth-tab active" id="authLoginTab" type="button">Log in</button><button class="auth-tab" id="authSignupTab" type="button">Sign up</button></div>
+<form class="auth-form" id="authLoginForm"><label>Username or email<input name="identifier" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required minlength="8"></label><button class="btn green" type="submit">Log in</button></form>
+<form class="auth-form" id="authSignupForm" hidden><label>Username<input name="username" autocomplete="username" required minlength="3" maxlength="32"></label><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label><button class="btn green" type="submit">Create account</button></form>
+<div class="auth-status" id="authStatus"></div><div class="auth-required">Your password is securely hashed on the server. Your session uses an HttpOnly cookie.</div>
+</div></div>
+
 <nav aria-label="Content categories" class="conefix-category-nav">
 <div class="conefix-category-nav-inner">
 <a class="category-nav-link active" data-category-nav="resourcepacks" href="#resourcepacks">Resource Packs</a>
@@ -1775,6 +1786,22 @@ document.addEventListener('click',e=>{
     }); obs.observe(grid,{childList:true});
   });
 
+
+  /* CONEFIX account authentication */
+  const authModal=document.getElementById('authModal'), authStatus=document.getElementById('authStatus');
+  let authUser=null;
+  function openAuth(mode='login'){authModal.classList.add('open');authModal.setAttribute('aria-hidden','false');setAuthMode(mode);setTimeout(()=>document.querySelector(mode==='signup'?'#authSignupForm input':'#authLoginForm input')?.focus(),30);}
+  function closeAuth(){authModal.classList.remove('open');authModal.setAttribute('aria-hidden','true');if(authStatus)authStatus.textContent='';}
+  function setAuthMode(mode){const login=mode==='login';document.getElementById('authTitle').textContent=login?'Log in to CONEFIX':'Create your CONEFIX account';document.getElementById('authSubtitle').textContent=login?'Use your account to access the Creator Dashboard.':'Create an account to publish and manage your Minecraft projects.';document.getElementById('authLoginForm').hidden=!login;document.getElementById('authSignupForm').hidden=login;document.getElementById('authLoginTab').classList.toggle('active',login);document.getElementById('authSignupTab').classList.toggle('active',!login);if(authStatus)authStatus.textContent='';}
+  function renderAuth(){const box=document.getElementById('authActions');if(!box)return;if(authUser){box.innerHTML='<span class="auth-user">👤 '+esc(authUser.username)+'</span><button class="btn dark" type="button" id="logoutBtn">Log out</button>';document.getElementById('logoutBtn').onclick=async()=>{await fetch('/api/auth/logout',{method:'POST',credentials:'include'});authUser=null;renderAuth();creatorGet();};}else{box.innerHTML='<button class="btn dark" type="button" id="loginOpen">Log in</button><button class="btn green" type="button" id="signupOpen">Sign up</button>';document.getElementById('loginOpen').onclick=()=>openAuth('login');document.getElementById('signupOpen').onclick=()=>openAuth('signup');}}
+  document.getElementById('authClose')?.addEventListener('click',closeAuth);document.getElementById('authBackdrop')?.addEventListener('click',closeAuth);document.getElementById('authLoginTab')?.addEventListener('click',()=>setAuthMode('login'));document.getElementById('authSignupTab')?.addEventListener('click',()=>setAuthMode('signup'));
+  document.getElementById('authLoginForm')?.addEventListener('submit',async e=>{e.preventDefault();authStatus.textContent='Logging in…';try{const r=await fetch('/api/auth/login',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});const d=await r.json();if(!r.ok)throw Error(d.error||'Login failed.');authUser=d.user;closeAuth();renderAuth();creatorGet();}catch(err){authStatus.textContent=err instanceof TypeError ? 'Could not connect to the CONEFIX authentication server. Please refresh after the latest deployment is Ready.' : err.message;}});
+  document.getElementById('authSignupForm')?.addEventListener('submit',async e=>{e.preventDefault();authStatus.textContent='Creating account…';try{const r=await fetch('/api/auth/signup',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});const d=await r.json();if(!r.ok)throw Error(d.error||'Sign up failed.');authUser=d.user;closeAuth();renderAuth();creatorGet();}catch(err){authStatus.textContent=err instanceof TypeError ? 'Could not connect to the CONEFIX authentication server. Please refresh after the latest deployment is Ready.' : err.message;}});
+  async function authMe(){try{const r=await fetch('/api/auth/me',{credentials:'include',cache:'no-store'});const d=await r.json();authUser=d.user||null;}catch{}renderAuth();}
+  // Initialize authentication controls after all auth elements/functions exist.
+  // This also makes the Sign up / Log in buttons work on first page load.
+  renderAuth();
+  authMe();
   /* FIX: this state object was referenced everywhere below but never declared,
      which threw a ReferenceError the moment the dashboard tried to load and
      silently broke Create Project, Upload Version, Team and Settings. */
@@ -1794,8 +1821,8 @@ document.addEventListener('click',e=>{
   async function creatorGet(){
     const st=document.getElementById('creatorProjectsStatus');
     try{
-      const r=await fetch(creatorApi('/api/creator/projects'),{headers:{'Accept':'application/json'}});
-      if(!r.ok) throw Error('Creator API returned HTTP '+r.status);
+      const r=await fetch(creatorApi('/api/creator/my-projects'),{credentials:'include',headers:{'Accept':'application/json'}});
+      if(r.status===401){if(st) st.innerHTML='Please <button type="button" class="btn dark" onclick="openAuth(\'login\')">log in</button> to manage your projects.'; renderCreators(); return;} if(!r.ok) throw Error('Creator API returned HTTP '+r.status);
       const d=await r.json(); creatorState.projects=d.projects||[];
       if(st) st.textContent='Connected to Creator API.';
       renderCreators();
@@ -1828,11 +1855,11 @@ document.addEventListener('click',e=>{
   document.addEventListener('click',e=>{const up=e.target.closest('[data-upload-project]');if(up){creatorView('upload');const s=document.getElementById('creatorVersionProject');if(s)s.value=up.dataset.uploadProject;}const rm=e.target.closest('[data-remove-team]');if(rm){creatorState.team.splice(Number(rm.dataset.removeTeam),1);localStorage.setItem('conefixCreatorTeam',JSON.stringify(creatorState.team));renderCreators();}});
   document.getElementById('creatorProjectForm')?.addEventListener('submit',async e=>{
     e.preventDefault();const st=document.getElementById('creatorProjectStatus');st.textContent='Creating project…';
-    try{const r=await fetch(creatorApi('/api/creator/projects'),{method:'POST',body:new FormData(e.target)});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not create project');st.textContent='Project created successfully.';e.target.reset();await creatorGet();creatorView('projects');}catch(err){st.textContent=err.message;}
+    try{const r=await fetch(creatorApi('/api/creator/projects'),{method:'POST',credentials:'include',body:new FormData(e.target)});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not create project');st.textContent='Project created successfully.';e.target.reset();await creatorGet();creatorView('projects');}catch(err){st.textContent=err.message;}
   });
   document.getElementById('creatorVersionForm')?.addEventListener('submit',async e=>{
     e.preventDefault();const st=document.getElementById('creatorVersionStatus'),fd=new FormData(e.target),pid=fd.get('project_id');st.textContent='Uploading version…';
-    try{const r=await fetch(creatorApi('/api/creator/projects/'+encodeURIComponent(pid)+'/versions'),{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw Error(d.error||'Upload failed');st.textContent='Version uploaded successfully.';e.target.reset();await creatorGet();}catch(err){st.textContent=err.message;}
+    try{const r=await fetch(creatorApi('/api/creator/projects/'+encodeURIComponent(pid)+'/versions'),{method:'POST',credentials:'include',body:fd});const d=await r.json();if(!r.ok)throw Error(d.error||'Upload failed');st.textContent='Version uploaded successfully.';e.target.reset();await creatorGet();}catch(err){st.textContent=err.message;}
   });
   document.getElementById('creatorTeamAdd')?.addEventListener('click',()=>{const i=document.getElementById('creatorTeamInput');if(i.value.trim()){creatorState.team.push(i.value.trim());localStorage.setItem('conefixCreatorTeam',JSON.stringify(creatorState.team));i.value='';renderCreators();}});
   document.getElementById('creatorSettingsForm')?.addEventListener('submit',e=>{e.preventDefault();creatorState.settings.name=document.getElementById('creatorDisplayName').value;creatorState.settings.bio=document.getElementById('creatorBio').value;localStorage.setItem('conefixCreatorSettings',JSON.stringify(creatorState.settings));document.getElementById('creatorSettingsStatus').textContent='Settings saved.';});
